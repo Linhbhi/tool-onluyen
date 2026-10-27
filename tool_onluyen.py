@@ -453,7 +453,8 @@ def parse_raw_questions(raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 # TUI WORKFLOW CÁC CHỨC NĂNG
 # ==============================================================================
 def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
-    """Quy trình chọn bài, giải bài tự động và nộp."""
+    """Quy trình chọn bài, giải bài tự động và nộp với tùy chọn phân bổ thời gian và chế độ nộp."""
+    env_config = load_env_config()
     with console.status("[cyan]Đang tải danh sách bài tập chưa làm...[/cyan]"):
         assignments = client.get_assignments(filter_status="todo")
 
@@ -493,10 +494,45 @@ def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
     put_url = test_data.get("preSignedUrlAnswer", "")
     start_time = test_data.get("startTime", int(time.time()))
     questions = parse_raw_questions(questions_raw)
+    total_q = len(questions)
 
-    console.print(f"[green]✓ Đã tải {len(questions)} câu hỏi.[/green]\n")
+    console.print(f"[green]✓ Đã tải {total_q} câu hỏi.[/green]\n")
 
-    # Giải đề
+    # 1. CẤU HÌNH THỜI GIAN & PHÂN BỔ MỖI CÂU
+    console.print("[bold cyan]─── CẤU HÌNH THỜI GIAN & PHÂN BỔ LÀM BÀI ───[/bold cyan]")
+    console.print("  [1] Giải tốc độ tối đa (làm ngay không chờ giữa các câu)")
+    console.print("  [2] Chia đều tổng thời gian làm bài (ví dụ: làm trong 10 phút, tự tính số giây/câu)")
+    console.print("  [3] Tùy chỉnh cố định số giây mỗi câu (ví dụ: 15s/câu, mô phỏng như người thật)")
+    pacing_choice = Prompt.ask("Chọn kiểu phân bổ", choices=["1", "2", "3"], default="1")
+
+    delay_per_question = 0.0
+    target_total_minutes = float(env_config.get("DEFAULT_WAIT_MINUTES", "10"))
+
+    if pacing_choice == "2":
+        m_str = Prompt.ask("Tổng thời gian làm bài (phút)", default=str(int(target_total_minutes)))
+        target_total_minutes = float(m_str)
+        total_seconds = target_total_minutes * 60
+        delay_per_question = max(0.5, total_seconds / total_q)
+        console.print(f"[yellow]➜ Tự động phân bổ: ~{delay_per_question:.1f} giây cho mỗi câu hỏi.[/yellow]")
+    elif pacing_choice == "3":
+        s_str = Prompt.ask("Số giây làm mỗi câu (giây)", default="15")
+        delay_per_question = float(s_str)
+        console.print(f"[yellow]➜ Thời gian mỗi câu: {delay_per_question}s (Dự kiến tổng bài: {delay_per_question * total_q / 60:.1f} phút)[/yellow]")
+
+    # 2. CẤU HÌNH CHẾ ĐỘ NỘP BÀI
+    console.print("\n[bold cyan]─── CHẾ ĐỘ NỘP BÀI KHI LÀM XONG ───[/bold cyan]")
+    console.print("  [1] Tự động nộp bài sau khi làm xong (đảm bảo đủ thời gian tối thiểu Onluyen)")
+    console.print("  [2] Hẹn giờ nộp bài (đợi đủ đúng số phút yêu cầu mới submit)")
+    console.print("  [3] KHÔNG nộp bài (Chỉ lưu đáp án lên server S3, nộp thủ công trên web)")
+    submit_mode = Prompt.ask("Chọn chế độ nộp", choices=["1", "2", "3"], default="1")
+
+    target_wait_seconds = 180  # Tối thiểu 3 phút theo quy định Onluyen
+    if submit_mode == "2":
+        w_min = Prompt.ask("Số phút làm bài mong muốn trước khi submit", default=str(int(target_total_minutes)))
+        target_wait_seconds = int(float(w_min) * 60)
+
+    # 3. TIẾN HÀNH GIẢI ĐỀ
+    console.print(f"\n[bold green]► BẮT ĐẦU GIẢI {total_q} CÂU HỎI...[/bold green]")
     s3_answers = []
     with Progress(
         SpinnerColumn(),
@@ -506,14 +542,15 @@ def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
         TimeElapsedColumn(),
         console=console
     ) as progress:
-        task = progress.add_task("[cyan]Đang giải câu hỏi...", total=len(questions))
+        task = progress.add_task("[cyan]Đang giải câu hỏi...", total=total_q)
 
         for q in questions:
             idx = q["index"]
             step_id = q["stepId"]
             q_type = q["type"]
-            progress.update(task, description=f"[cyan]Đang giải câu {idx}/{len(questions)} ({q_type})...")
+            progress.update(task, description=f"[cyan]Đang giải câu {idx}/{total_q} ({q_type})...")
 
+            t0 = time.time()
             if q_type == "choice":
                 opts_text = [f"{chr(65+i)}. {opt['text']}" for i, opt in enumerate(q["options"])]
                 ans_letter = solver.solve_choice(q["content"], opts_text)
@@ -547,12 +584,17 @@ def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
                     "optionText": [text_ans]
                 })
 
+            # Phân bổ thời gian mỗi câu nếu được cài đặt
+            spent = time.time() - t0
+            if delay_per_question > spent:
+                time.sleep(delay_per_question - spent)
+
             progress.advance(task)
 
-    console.print(f"\n[bold green]✓ Đã giải xong toàn bộ {len(s3_answers)} câu hỏi![/bold green]")
+    console.print(f"\n[bold green]✓ Đã hoàn thành giải toàn bộ {len(s3_answers)} câu hỏi![/bold green]")
 
-    # Lưu S3
-    with console.status("[cyan]Đang lưu đáp án lên server Onluyen (AWS S3)...[/cyan]"):
+    # 4. LƯU ĐÁP ÁN LÊN S3
+    with console.status("[cyan]Đang đồng bộ đáp án lên server Onluyen (AWS S3)...[/cyan]"):
         saved = client.upload_to_s3(put_url, s3_answers)
 
     if saved:
@@ -561,36 +603,32 @@ def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
         console.print("[bold red]Không thể lưu đáp án lên S3. Vui lòng kiểm tra lại mạng.[/bold red]")
         return
 
-    # Tùy chọn nộp
-    console.print("\n[bold yellow]Tùy chọn nộp bài:[/bold yellow]")
-    console.print("  [1] Nộp ngay (tự động chờ đủ 3 phút tối thiểu theo quy định Onluyen)")
-    console.print("  [2] Hẹn giờ làm bài (ví dụ 10 phút, 15 phút rồi mới nộp)")
-    console.print("  [3] Chỉ lưu đáp án (tự nộp thủ công sau)")
-    submit_mode = Prompt.ask("Lựa chọn", choices=["1", "2", "3"], default="1")
-
+    # 5. XỬ LÝ CHẾ ĐỘ NỘP BÀI
     if submit_mode == "3":
-        console.print("[bold green]Đã lưu bài thành công. Bạn có thể mở web để nộp sau.[/bold green]")
+        console.print(Panel.fit(
+            "[bold yellow]CHẾ ĐỘ KHÔNG NỘP BÀI[/bold yellow]\n"
+            "Đáp án của bạn đã được LƯU HOÀN TOÀN trên hệ thống Onluyen.\n"
+            "Bạn có thể mở app.onluyen.vn kiểm tra lại và bấm nộp bất kỳ lúc nào.",
+            border_style="yellow"
+        ))
         return
-
-    target_wait_seconds = 180
-    if submit_mode == "2":
-        minutes = int(Prompt.ask("[cyan]Số phút muốn hệ thống làm bài trước khi nộp[/cyan]", default="10"))
-        target_wait_seconds = minutes * 60
 
     now = int(time.time())
     elapsed = now - start_time
     remaining = max(0, target_wait_seconds - elapsed)
 
     if remaining > 0:
-        console.print(f"\n[yellow]⏳ Đang đếm ngược thời gian làm bài ({remaining}s còn lại)...[/yellow]")
+        minutes_left = remaining // 60
+        secs_left = remaining % 60
+        console.print(f"\n[yellow]⏳ Đang đếm ngược thời gian nộp bài: còn {minutes_left:02d}:{secs_left:02d} nữa ({remaining}s)...[/yellow]")
         with Progress(console=console) as progress:
-            wait_task = progress.add_task("[cyan]Đang chờ...", total=remaining)
+            wait_task = progress.add_task("[cyan]Đang chờ thời gian nộp bài...", total=remaining)
             while remaining > 0:
                 time.sleep(1)
                 remaining -= 1
                 progress.advance(wait_task)
 
-    with console.status("[cyan]Đang nộp bài...[/cyan]"):
+    with console.status("[cyan]Đang gửi lệnh nộp bài chính thức...[/cyan]"):
         res = client.submit(assign_id)
 
     if res.get("success"):
@@ -601,6 +639,7 @@ def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
             console.print(f"[bold cyan]Điểm số của bạn:[/bold cyan] [bold green]{score}[/bold green] / 10")
     else:
         console.print(f"[bold red]Nộp bài chưa thành công:[/bold red] {res.get('message')}")
+
 
 
 def do_view_results(client: OnluyenClient):
