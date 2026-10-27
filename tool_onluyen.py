@@ -118,7 +118,7 @@ class OnluyenClient:
 
     def get_assignments(self, filter_status: str = "todo") -> List[Dict[str, Any]]:
         """Lấy danh sách bài tập được giao."""
-        url = f"{self.BASE_API}/assignment/list-assignment-student-by-type"
+        url = f"{self.BASE_API}/school-online/assignment/assign-student-suggest"
         params = {
             "pageIndex": 1,
             "pageSize": 50,
