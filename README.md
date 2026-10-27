@@ -4,10 +4,11 @@ Chương trình Terminal UI (TUI) tự động tải đề, giải bài tập v�
 
 ## Tính năng
 
-- **Giao diện dòng lệnh trực quan (Rich TUI)**: Quản lý danh sách bài tập, hiển thị tiến độ giải từng câu (progress bar) và bộ đếm ngược thời gian nộp bài.
+- **Giao diện dòng lệnh trực quan (Rich TUI)**: Quản lý danh sách bài tập trường học, hiển thị tiến độ giải từng câu (progress bar) và bộ đếm ngược thời gian nộp bài.
 - **Hỗ trợ 2 AI Solver**:
-  1. **Google Gemini API**: Giải chính xác cao các dạng bài (hỗ trợ `gemini-2.5-flash` / `gemini-2.0-flash` qua REST API trực tiếp).
+  1. **Google Gemini API**: Giải chính xác cao với SDK chính thức `google-genai` (mặc định model `gemini-3.8-flash` kiến trúc Argon 4, hỗ trợ fallback sang `gemini-2.5-flash` / `gemini-2.0-flash`).
   2. **Jev Classifier (`classifier.dev`)**: Zero-shot classifier miễn phí qua `https://classifier.dev/<labels>/<text>`, không cần API key.
+- **Tự động lưu cấu hình**: Nhập tài khoản Onluyen hoặc Gemini API key một lần, tool tự động lưu vào file `.env` để tái sử dụng.
 - **Hỗ trợ đầy đủ dạng câu hỏi**:
   - Trắc nghiệm 4 đáp án (A, B, C, D).
   - Trắc nghiệm Đúng / Sai.
@@ -22,7 +23,7 @@ Chương trình Terminal UI (TUI) tự động tải đề, giải bài tập v�
 Yêu cầu Python 3.9+.
 
 ```bash
-git clone https://github.com/<your-username>/tool-onluyen.git
+git clone https://github.com/Linhbhi/tool-onluyen.git
 cd tool-onluyen
 pip install -r requirements.txt
 ```
@@ -43,7 +44,7 @@ ONLUYEN_PASSWORD=matkhau
 GEMINI_API_KEY=AIzaSy...
 ```
 
-*(Nếu không điền trong `.env`, chương trình sẽ hỏi trực tiếp trên màn hình terminal khi chạy).*
+*(Nếu không điền trong `.env`, chương trình sẽ hỏi trực tiếp trên màn hình terminal khi chạy và tự động lưu lại).*
 
 ## Sử dụng
 
