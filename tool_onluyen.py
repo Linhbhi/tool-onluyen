@@ -4,8 +4,8 @@
 tool-onluyen: Terminal UI tự động giải và nộp bài tập onluyen.vn
 Hỗ trợ solver qua:
   1. Google GenAI Python SDK (google-genai client.models.generate_content)
-     - Fallback sang REST API v1beta nếu chưa cài SDK
   2. Jev Zero-shot Classifier (https://classifier.dev/)
+Tự động lưu và đọc cấu hình từ file .env.
 """
 
 import os
@@ -32,6 +32,55 @@ DEFAULT_USER_AGENT = (
     "Chrome/127.0.0.0 Mobile Safari/537.36"
 )
 
+ENV_FILE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+
+
+# ==============================================================================
+# QUẢN LÝ CẤU HÌNH .ENV
+# ==============================================================================
+def load_env_config() -> Dict[str, str]:
+    """Đọc cấu hình từ file .env."""
+    config = {}
+    if os.path.exists(ENV_FILE_PATH):
+        try:
+            with open(ENV_FILE_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, v = line.split("=", 1)
+                        config[k.strip()] = v.strip().strip("'\"")
+        except Exception:
+            pass
+    return config
+
+
+def save_env_config(updates: Dict[str, str]):
+    """Ghi hoặc cập nhật cấu hình vào file .env mà không mất các dòng comment."""
+    current = {}
+    lines = []
+    if os.path.exists(ENV_FILE_PATH):
+        try:
+            with open(ENV_FILE_PATH, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception:
+            lines = []
+
+    # Parse current keys
+    for line in lines:
+        s = line.strip()
+        if s and not s.startswith("#") and "=" in s:
+            k, v = s.split("=", 1)
+            current[k.strip()] = v.strip().strip("'\"")
+
+    # Update
+    current.update(updates)
+
+    # Write back clean
+    with open(ENV_FILE_PATH, "w", encoding="utf-8") as f:
+        f.write("# Cấu hình tài khoản Onluyen & Gemini Key (tự động cập nhật)\n")
+        for k, v in current.items():
+            f.write(f"{k}={v}\n")
+
 
 def clean_html(raw_html: str) -> str:
     """Loại bỏ HTML thừa, giữ lại link ảnh Markdown và định dạng dòng."""
@@ -53,7 +102,7 @@ def clean_html(raw_html: str) -> str:
 
 
 # ==============================================================================
-# ONLUYEN API CLIENT
+# ONLUYEN API CLIENT (SCHOOL ONLINE ENDPOINTS)
 # ==============================================================================
 class OnluyenClient:
     LOGIN_URL = "https://oauth.onluyen.vn/api/account/login"
@@ -116,16 +165,10 @@ class OnluyenClient:
             console.print(f"[red]Lỗi đăng nhập: {e}[/red]")
         return False
 
-    def get_assignments(self, filter_status: str = "todo") -> List[Dict[str, Any]]:
-        """Lấy danh sách bài tập được giao."""
-        url = f"{self.BASE_API}/school-online/assignment/assign-student-suggest"
-        params = {
-            "pageIndex": 1,
-            "pageSize": 50,
-            "schoolYear": self.school_year,
-            "typeApp": self.code_app
-        }
-        res = self.session.get(url, params=params, timeout=15)
+    def get_assignments(self, filter_status: str = "all", page_size: int = 50) -> List[Dict[str, Any]]:
+        """Lấy danh sách bài tập được giao từ school-online endpoint."""
+        url = f"{self.BASE_API}/school-online/assignment/assign-student-suggest?pageIndex=1&pageSize={page_size}"
+        res = self.session.get(url, timeout=15)
         if res.status_code != 200:
             return []
 
@@ -135,36 +178,45 @@ class OnluyenClient:
             st = item.get("status", 0)
             if filter_status == "todo" and st not in (0, 1):
                 continue
-            if filter_status == "done" and st != 2:
+            if filter_status == "done" and st not in (2, 3):
                 continue
 
+            status_desc = "Đã nộp" if st in (2, 3) else "Đang làm" if st == 1 else "Chưa làm"
             result.append({
                 "assignId": item.get("assignId"),
                 "name": item.get("name"),
+                "className": item.get("className", ""),
                 "status": st,
-                "statusText": "Chưa làm" if st == 0 else "Đang làm" if st == 1 else "Đã nộp",
+                "statusText": status_desc,
                 "totalScore": item.get("totalScore"),
                 "score": item.get("score"),
-                "totalQuestion": item.get("totalQuestion", 0)
+                "timeStart": item.get("timeStart"),
+                "timeEnd": item.get("timeEnd")
             })
         return result
 
     def get_test_data(self, assign_id: str) -> Optional[Dict[str, Any]]:
-        """Lấy dữ liệu đề bài thi."""
+        """Lấy đề thi và danh sách câu hỏi."""
         # 1. Kích hoạt start nếu bài mới
-        url_start = f"{self.BASE_API}/assignment/student/start"
-        self.session.post(url_start, json={"assignId": assign_id}, timeout=15)
+        url_start = f"{self.BASE_API}/school-online/assignment/start/{assign_id}"
+        self.session.post(url_start, json={}, timeout=15)
 
         # 2. Tải doing data
-        url_doing = f"{self.BASE_API}/assignment/student/get-doing"
-        res = self.session.get(url_doing, params={"assignId": assign_id}, timeout=20)
-        if res.status_code != 200:
-            return None
+        url_doing = f"{self.BASE_API}/school-online/assignment/doing/{assign_id}"
+        res = self.session.get(url_doing, timeout=20)
+        if res.status_code == 200:
+            return res.json().get("data")
 
-        return res.json().get("data")
+        # Fallback detail
+        url_detail = f"{self.BASE_API}/school-online/assignment/detail/{assign_id}"
+        res_detail = self.session.get(url_detail, timeout=20)
+        if res_detail.status_code == 200:
+            return res_detail.json().get("data")
+
+        return None
 
     def upload_to_s3(self, put_url: str, s3_answers: List[Dict[str, Any]]) -> bool:
-        """Gửi JSON đáp án trực tiếp lên AWS S3."""
+        """Upload trực tiếp đáp án lên AWS S3."""
         headers = {
             "Content-Type": "application/json",
             "Origin": "https://app.onluyen.vn",
@@ -173,37 +225,39 @@ class OnluyenClient:
         res = requests.put(put_url, data=json.dumps(s3_answers, ensure_ascii=False), headers=headers, timeout=20)
         return res.status_code == 200
 
-    def submit(self, assign_id: str, force: bool = False) -> Dict[str, Any]:
+    def submit(self, assign_id: str) -> Dict[str, Any]:
         """Gửi lệnh nộp bài."""
-        url = f"{self.BASE_API}/assignment/student/submit"
-        res = self.session.post(url, json={"assignId": assign_id}, timeout=20)
+        url = f"{self.BASE_API}/school-online/assignment/submit/{assign_id}"
+        res = self.session.post(url, json={}, timeout=20)
         if res.status_code == 200:
             return res.json()
         return {"success": False, "message": f"HTTP {res.status_code}: {res.text}"}
 
+    def get_result_detail(self, assign_id: str) -> Optional[Dict[str, Any]]:
+        """Lấy bảng điểm chi tiết và lời giải."""
+        url = f"{self.BASE_API}/school-online/assignment/detail/{assign_id}"
+        res = self.session.get(url, timeout=15)
+        if res.status_code == 200:
+            return res.json().get("data")
+        return None
+
 
 # ==============================================================================
-# AI SOLVERS: GEMINI & JEV CLASSIFIER
+# AI SOLVERS: GEMINI SDK & JEV CLASSIFIER
 # ==============================================================================
 class BaseSolver:
     def solve_choice(self, question: str, options: List[str]) -> str:
-        """Trả về chữ cái 'A', 'B', 'C', 'D'."""
         raise NotImplementedError
 
     def solve_true_false(self, question: str, statements: List[str]) -> List[str]:
-        """Trả về mảng ['Đ', 'S', ...] tương ứng với statements."""
         raise NotImplementedError
 
     def solve_text(self, question: str) -> str:
-        """Trả về chuỗi kết quả ngắn."""
         raise NotImplementedError
 
 
 class JevClassifierSolver(BaseSolver):
-    """
-    Sử dụng API zero-shot classifier: https://classifier.dev/
-    Docs & curl: curl https://classifier.dev/<labels>/<text>
-    """
+    """Zero-shot text classifier via classifier.dev."""
     BASE_URL = "https://classifier.dev"
 
     def _query(self, labels: List[str], text: str) -> str:
@@ -244,12 +298,8 @@ class JevClassifierSolver(BaseSolver):
 
 class GeminiSolver(BaseSolver):
     """
-    Sử dụng Google GenAI SDK chính thức (google-genai) theo chuẩn docs:
-      from google import genai
-      from google.genai import types
-      client = genai.Client(api_key=...)
-      client.models.generate_content(...)
-    Tự động fallback sang REST API v1beta nếu môi trường chưa hỗ trợ SDK.
+    Google GenAI SDK (google-genai client.models.generate_content)
+    với REST API fallback.
     """
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         self.api_key = api_key
@@ -265,7 +315,6 @@ class GeminiSolver(BaseSolver):
             self.genai_client = None
 
     def _call(self, prompt: str) -> str:
-        # Cách 1: Dùng google-genai SDK chính thức
         if self.genai_client:
             try:
                 config = self.types.GenerateContentConfig(
@@ -279,8 +328,7 @@ class GeminiSolver(BaseSolver):
                 )
                 if response and response.text:
                     return response.text.strip()
-            except Exception as e:
-                # Fallback model nếu model 2.5 chưa mở trên key
+            except Exception:
                 if "2.5" in self.model:
                     try:
                         self.model = "gemini-2.0-flash"
@@ -294,7 +342,7 @@ class GeminiSolver(BaseSolver):
                     except Exception:
                         pass
 
-        # Cách 2: Fallback sang REST API trực tiếp
+        # Fallback REST API
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
@@ -363,7 +411,7 @@ class GeminiSolver(BaseSolver):
 
 
 # ==============================================================================
-# TUI WORKFLOW
+# HÀM PHỤ TRỢ PARSE CÂU HỎI
 # ==============================================================================
 def parse_raw_questions(raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     questions = []
@@ -399,64 +447,11 @@ def parse_raw_questions(raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return questions
 
 
-def main():
-    console.print(Panel.fit(
-        "[bold cyan]TOOL ONLUYEN - TUI AUTO SOLVER[/bold cyan]\n"
-        "[dim]Tự động giải và nộp bài onluyen.vn với Google GenAI SDK & Jev Classifier[/dim]",
-        border_style="cyan"
-    ))
-
-    # 1. Credentials
-    client = OnluyenClient()
-    saved_u = os.environ.get("ONLUYEN_USERNAME", "")
-    saved_p = os.environ.get("ONLUYEN_PASSWORD", "")
-
-    # Đọc .env nếu có
-    if os.path.exists(".env"):
-        try:
-            with open(".env") as f:
-                for line in f:
-                    if "=" in line:
-                        k, v = line.strip().split("=", 1)
-                        if k == "ONLUYEN_USERNAME" and not saved_u:
-                            saved_u = v
-                        elif k == "ONLUYEN_PASSWORD" and not saved_p:
-                            saved_p = v
-                        elif k == "GEMINI_API_KEY" and "GEMINI_API_KEY" not in os.environ:
-                            os.environ["GEMINI_API_KEY"] = v
-        except Exception:
-            pass
-
-    username = Prompt.ask("[bold green]Tài khoản Onluyen (SĐT/Email)[/bold green]", default=saved_u)
-    password = Prompt.ask("[bold green]Mật khẩu Onluyen[/bold green]", default=saved_p, password=True)
-
-    with console.status("[cyan]Đang đăng nhập Onluyen.vn...[/cyan]"):
-        if not client.login(username, password):
-            console.print("[bold red]Đăng nhập thất bại! Vui lòng kiểm tra lại tài khoản.[/bold red]")
-            return
-
-    console.print(f"[bold green]✓ Đăng nhập thành công:[/bold green] {client.display_name or client.username} (ID: {client.user_id})")
-
-    # 2. Chọn Solver
-    console.print("\n[bold yellow]Chọn AI Solver để giải đề:[/bold yellow]")
-    console.print("  [1] [bold]Google Gemini API (Official google-genai SDK)[/bold] (Độ chính xác cao)")
-    console.print("  [2] [bold]Jev Classifier API (classifier.dev)[/bold] (Miễn phí, zero-shot classifier, không cần API key)")
-    solver_choice = Prompt.ask("Lựa chọn", choices=["1", "2"], default="1")
-
-    solver: BaseSolver
-    if solver_choice == "1":
-        gemini_key = os.environ.get("GEMINI_API_KEY", "")
-        key = Prompt.ask("[bold green]Nhập Gemini API Key[/bold green]", default=gemini_key)
-        if not key:
-            console.print("[red]Cần có Gemini API Key để sử dụng chế độ này.[/red]")
-            return
-        solver = GeminiSolver(api_key=key)
-        console.print("[green]✓ Đã cấu hình Google GenAI SDK (gemini-2.5-flash / gemini-2.0-flash)[/green]")
-    else:
-        solver = JevClassifierSolver()
-        console.print("[green]✓ Đã cấu hình Jev Classifier (classifier.dev)[/green]")
-
-    # 3. Lấy danh sách bài tập
+# ==============================================================================
+# TUI WORKFLOW CÁC CHỨC NĂNG
+# ==============================================================================
+def do_solve_workflow(client: OnluyenClient, solver: BaseSolver):
+    """Quy trình chọn bài, giải bài tự động và nộp."""
     with console.status("[cyan]Đang tải danh sách bài tập chưa làm...[/cyan]"):
         assignments = client.get_assignments(filter_status="todo")
 
@@ -467,11 +462,11 @@ def main():
     table = Table(title="Danh sách bài tập cần làm", border_style="blue")
     table.add_column("STT", style="cyan", width=5)
     table.add_column("Tên bài tập", style="white")
-    table.add_column("Số câu", style="magenta", width=8)
+    table.add_column("Lớp", style="yellow", width=15)
     table.add_column("Trạng thái", style="green", width=12)
 
     for i, a in enumerate(assignments, 1):
-        table.add_row(str(i), a["name"], str(a["totalQuestion"]), a["statusText"])
+        table.add_row(str(i), a["name"], a.get("className", ""), a["statusText"])
 
     console.print(table)
     idx_choice = Prompt.ask(f"[bold cyan]Chọn số thứ tự bài muốn làm (1 - {len(assignments)})[/bold cyan]", default="1")
@@ -484,7 +479,7 @@ def main():
     assign_id = chosen_assignment["assignId"]
     console.print(f"\n[bold]Bắt đầu làm bài:[/bold] [yellow]{chosen_assignment['name']}[/yellow] (ID: {assign_id})")
 
-    # 4. Tải đề
+    # Tải đề
     with console.status("[cyan]Đang tải câu hỏi...[/cyan]"):
         test_data = client.get_test_data(assign_id)
 
@@ -499,7 +494,7 @@ def main():
 
     console.print(f"[green]✓ Đã tải {len(questions)} câu hỏi.[/green]\n")
 
-    # 5. Giải bài với AI
+    # Giải đề
     s3_answers = []
     with Progress(
         SpinnerColumn(),
@@ -535,7 +530,6 @@ def main():
             elif q_type == "true_false":
                 stmts = [opt["text"] for opt in q["options"]]
                 tf_list = solver.solve_true_false(q["content"], stmts)
-                # Map 'Đ' -> 'true', 'S' -> 'false'
                 opt_texts = ["true" if v == "Đ" else "false" for v in tf_list]
                 s3_answers.append({
                     "stepId": step_id,
@@ -543,7 +537,7 @@ def main():
                     "optionText": opt_texts
                 })
 
-            else: # text
+            else:
                 text_ans = solver.solve_text(q["content"])
                 s3_answers.append({
                     "stepId": step_id,
@@ -553,9 +547,9 @@ def main():
 
             progress.advance(task)
 
-    console.print(f"\n[bold green]✓ Đã hoàn thành giải toàn bộ {len(s3_answers)} câu hỏi![/bold green]")
+    console.print(f"\n[bold green]✓ Đã giải xong toàn bộ {len(s3_answers)} câu hỏi![/bold green]")
 
-    # 6. Lưu đáp án lên S3
+    # Lưu S3
     with console.status("[cyan]Đang lưu đáp án lên server Onluyen (AWS S3)...[/cyan]"):
         saved = client.upload_to_s3(put_url, s3_answers)
 
@@ -565,7 +559,7 @@ def main():
         console.print("[bold red]Không thể lưu đáp án lên S3. Vui lòng kiểm tra lại mạng.[/bold red]")
         return
 
-    # 7. Nộp bài hoặc hẹn giờ
+    # Tùy chọn nộp
     console.print("\n[bold yellow]Tùy chọn nộp bài:[/bold yellow]")
     console.print("  [1] Nộp ngay (tự động chờ đủ 3 phút tối thiểu theo quy định Onluyen)")
     console.print("  [2] Hẹn giờ làm bài (ví dụ 10 phút, 15 phút rồi mới nộp)")
@@ -576,7 +570,7 @@ def main():
         console.print("[bold green]Đã lưu bài thành công. Bạn có thể mở web để nộp sau.[/bold green]")
         return
 
-    target_wait_seconds = 180  # Mặc định 3 phút
+    target_wait_seconds = 180
     if submit_mode == "2":
         minutes = int(Prompt.ask("[cyan]Số phút muốn hệ thống làm bài trước khi nộp[/cyan]", default="10"))
         target_wait_seconds = minutes * 60
@@ -594,7 +588,6 @@ def main():
                 remaining -= 1
                 progress.advance(wait_task)
 
-    # Gửi lệnh submit
     with console.status("[cyan]Đang nộp bài...[/cyan]"):
         res = client.submit(assign_id)
 
@@ -606,6 +599,131 @@ def main():
             console.print(f"[bold cyan]Điểm số của bạn:[/bold cyan] [bold green]{score}[/bold green] / 10")
     else:
         console.print(f"[bold red]Nộp bài chưa thành công:[/bold red] {res.get('message')}")
+
+
+def do_view_results(client: OnluyenClient):
+    """Xem kết quả các bài đã nộp."""
+    with console.status("[cyan]Đang tải danh sách bài đã nộp...[/cyan]"):
+        assignments = client.get_assignments(filter_status="done")
+
+    if not assignments:
+        console.print("[yellow]Chưa có bài tập nào đã nộp![/yellow]")
+        return
+
+    table = Table(title="Danh sách bài đã nộp", border_style="green")
+    table.add_column("STT", style="cyan", width=5)
+    table.add_column("Tên bài tập", style="white")
+    table.add_column("Điểm số", style="bold green", width=10)
+    table.add_column("Trạng thái", style="magenta", width=12)
+
+    for i, a in enumerate(assignments, 1):
+        score_str = str(a.get("score") or a.get("totalScore") or "Đã nộp")
+        table.add_row(str(i), a["name"], score_str, a["statusText"])
+
+    console.print(table)
+
+
+def main():
+    console.print(Panel.fit(
+        "[bold cyan]TOOL ONLUYEN - TERMINAL UI[/bold cyan]\n"
+        "[dim]Tự động giải và nộp bài onluyen.vn với Gemini SDK & Jev Classifier[/dim]",
+        border_style="cyan"
+    ))
+
+    # Đọc cấu hình từ .env
+    env_config = load_env_config()
+    saved_u = env_config.get("ONLUYEN_USERNAME", "")
+    saved_p = env_config.get("ONLUYEN_PASSWORD", "")
+    saved_gemini = env_config.get("GEMINI_API_KEY", "")
+
+    # Đăng nhập
+    client = OnluyenClient()
+    if not saved_u or not saved_p:
+        console.print("[yellow]Chưa tìm thấy tài khoản trong file .env, vui lòng nhập:[/yellow]")
+        username = Prompt.ask("[bold green]Tài khoản Onluyen (SĐT/Email)[/bold green]", default=saved_u)
+        password = Prompt.ask("[bold green]Mật khẩu Onluyen[/bold green]", default=saved_p, password=True)
+        # Lưu vào .env để lần sau không phải nhập lại
+        save_env_config({"ONLUYEN_USERNAME": username, "ONLUYEN_PASSWORD": password})
+    else:
+        username = saved_u
+        password = saved_p
+        console.print(f"[dim]Đã nạp tài khoản lưu trong .env: {username}[/dim]")
+
+    with console.status("[cyan]Đang đăng nhập Onluyen.vn...[/cyan]"):
+        if not client.login(username, password):
+            console.print("[bold red]Đăng nhập thất bại! Vui lòng kiểm tra lại tài khoản trong file .env.[/bold red]")
+            # Xóa cache nếu tài khoản sai
+            username = Prompt.ask("[bold green]Nhập lại tài khoản[/bold green]")
+            password = Prompt.ask("[bold green]Nhập lại mật khẩu[/bold green]", password=True)
+            if client.login(username, password):
+                save_env_config({"ONLUYEN_USERNAME": username, "ONLUYEN_PASSWORD": password})
+            else:
+                return
+
+    console.print(f"[bold green]✓ Đăng nhập thành công:[/bold green] {client.display_name or client.username} (Lớp ID: {client.school_id})")
+
+    # Khởi tạo Solver
+    solver: Optional[BaseSolver] = None
+    solver_mode = env_config.get("DEFAULT_SOLVER", "1")
+
+    while True:
+        console.print("\n[bold cyan]═══ MENU CHỨC NĂNG ═══[/bold cyan]")
+        console.print("  [1] [bold]Bắt đầu giải bài tập tự động[/bold]")
+        console.print("  [2] [bold]Xem kết quả các bài đã nộp[/bold]")
+        console.print("  [3] [bold]Cấu hình AI Solver (Gemini / Jev Classifier)[/bold]")
+        console.print("  [4] [bold]Đổi tài khoản Onluyen[/bold]")
+        console.print("  [0] [dim]Thoát chương trình[/dim]")
+
+        choice = Prompt.ask("[bold green]Chọn chức năng[/bold green]", choices=["1", "2", "3", "4", "0"], default="1")
+
+        if choice == "0":
+            console.print("[cyan]Tạm biệt![/cyan]")
+            break
+
+        elif choice == "3" or (choice == "1" and solver is None):
+            console.print("\n[bold yellow]Chọn AI Solver để giải đề:[/bold yellow]")
+            console.print("  [1] [bold]Google Gemini API (Official google-genai SDK)[/bold] (Độ chính xác cao)")
+            console.print("  [2] [bold]Jev Classifier API (classifier.dev)[/bold] (Miễn phí, zero-shot classifier, không cần API key)")
+            s_choice = Prompt.ask("Lựa chọn", choices=["1", "2"], default=solver_mode)
+
+            if s_choice == "1":
+                gemini_key = saved_gemini or os.environ.get("GEMINI_API_KEY", "")
+                if not gemini_key:
+                    gemini_key = Prompt.ask("[bold green]Nhập Gemini API Key (từ Google AI Studio)[/bold green]")
+                    if gemini_key:
+                        save_env_config({"GEMINI_API_KEY": gemini_key, "DEFAULT_SOLVER": "1"})
+                        saved_gemini = gemini_key
+                if not gemini_key:
+                    console.print("[red]Cần có Gemini API Key để sử dụng chế độ này.[/red]")
+                    continue
+                solver = GeminiSolver(api_key=gemini_key)
+                save_env_config({"DEFAULT_SOLVER": "1"})
+                console.print("[green]✓ Đã lưu và cấu hình Gemini Solver (gemini-2.5-flash)[/green]")
+            else:
+                solver = JevClassifierSolver()
+                save_env_config({"DEFAULT_SOLVER": "2"})
+                console.print("[green]✓ Đã cấu hình Jev Classifier (classifier.dev)[/green]")
+
+            if choice == "3":
+                continue
+
+        if choice == "1":
+            if solver is None:
+                # Mặc định Jev nếu chưa cấu hình
+                solver = JevClassifierSolver()
+            do_solve_workflow(client, solver)
+
+        elif choice == "2":
+            do_view_results(client)
+
+        elif choice == "4":
+            new_u = Prompt.ask("[bold green]Nhập tài khoản mới[/bold green]")
+            new_p = Prompt.ask("[bold green]Nhập mật khẩu mới[/bold green]", password=True)
+            if client.login(new_u, new_p):
+                save_env_config({"ONLUYEN_USERNAME": new_u, "ONLUYEN_PASSWORD": new_p})
+                console.print(f"[bold green]✓ Đã đăng nhập và lưu tài khoản mới:[/bold green] {client.display_name}")
+            else:
+                console.print("[bold red]Đăng nhập thất bại với tài khoản mới![/bold red]")
 
 
 if __name__ == "__main__":
