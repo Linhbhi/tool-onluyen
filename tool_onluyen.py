@@ -625,6 +625,90 @@ def do_view_results(client: OnluyenClient):
     console.print(table)
 
 
+
+def do_config_menu(client: OnluyenClient) -> Dict[str, str]:
+    """Menu cấu hình tổng thể (Full Configuration TUI)."""
+    env_config = load_env_config()
+    while True:
+        cfg_table = Table(title="BẢNG CẤU HÌNH HỆ THỐNG (.env)", border_style="magenta")
+        cfg_table.add_column("Tùy chọn", style="cyan", width=30)
+        cfg_table.add_column("Giá trị hiện tại", style="yellow")
+        cfg_table.add_column("Mô tả", style="dim")
+
+        u = env_config.get("ONLUYEN_USERNAME", "")
+        p = env_config.get("ONLUYEN_PASSWORD", "")
+        masked_p = "*" * min(len(p), 8) if p else "(chưa cài)"
+        gemini_k = env_config.get("GEMINI_API_KEY", "")
+        masked_k = f"{gemini_k[:6]}...{gemini_k[-4:]}" if len(gemini_k) > 10 else (gemini_k if gemini_k else "(chưa cài)")
+        model = env_config.get("GEMINI_MODEL", "gemini-3.8-flash")
+        solver_mode = env_config.get("DEFAULT_SOLVER", "1")
+        solver_name = "Google Gemini SDK" if solver_mode == "1" else "Jev Classifier (classifier.dev)"
+        school_id = env_config.get("SCHOOL_ID", client.school_id)
+        school_year = env_config.get("SCHOOL_YEAR", client.school_year)
+        def_wait = env_config.get("DEFAULT_WAIT_MINUTES", "10")
+
+        cfg_table.add_row("[1] Tài khoản Onluyen", u or "(chưa cài)", "SĐT hoặc Email đăng nhập")
+        cfg_table.add_row("[2] Mật khẩu Onluyen", masked_p, "Mật khẩu bảo mật")
+        cfg_table.add_row("[3] Bộ giải mặc định (Solver)", solver_name, "Gemini hoặc Jev Classifier")
+        cfg_table.add_row("[4] Gemini API Key", masked_k, "Key từ Google AI Studio")
+        cfg_table.add_row("[5] Gemini Model", model, "gemini-3.8-flash (Argon 4), 2.5, ...")
+        cfg_table.add_row("[6] Thời gian làm bài hẹn giờ", f"{def_wait} phút", "Số phút làm bài trước khi nộp")
+        cfg_table.add_row("[7] Mã trường (School ID)", school_id, "Mã trường học kết nối")
+        cfg_table.add_row("[8] Năm học (School Year)", school_year, "Niên khóa hiện tại")
+        cfg_table.add_row("[0] Lưu & Quay lại Menu chính", "", "Áp dụng toàn bộ cài đặt")
+
+        console.print(cfg_table)
+        sub_choice = Prompt.ask("[bold green]Chọn mục muốn chỉnh sửa (0-8)[/bold green]", choices=["1", "2", "3", "4", "5", "6", "7", "8", "0"], default="0")
+
+        if sub_choice == "0":
+            break
+        elif sub_choice == "1":
+            new_u = Prompt.ask("Nhập tài khoản mới", default=u)
+            save_env_config({"ONLUYEN_USERNAME": new_u})
+            env_config["ONLUYEN_USERNAME"] = new_u
+        elif sub_choice == "2":
+            new_p = Prompt.ask("Nhập mật khẩu mới", password=True)
+            if new_p:
+                save_env_config({"ONLUYEN_PASSWORD": new_p})
+                env_config["ONLUYEN_PASSWORD"] = new_p
+        elif sub_choice == "3":
+            console.print("  [1] Google Gemini API (Độ chính xác cao)")
+            console.print("  [2] Jev Classifier API (classifier.dev) (Miễn phí, không cần key)")
+            new_s = Prompt.ask("Chọn Solver mặc định", choices=["1", "2"], default=solver_mode)
+            save_env_config({"DEFAULT_SOLVER": new_s})
+            env_config["DEFAULT_SOLVER"] = new_s
+        elif sub_choice == "4":
+            new_k = Prompt.ask("Nhập Gemini API Key mới", default=gemini_k)
+            save_env_config({"GEMINI_API_KEY": new_k})
+            env_config["GEMINI_API_KEY"] = new_k
+        elif sub_choice == "5":
+            console.print("  [1] gemini-3.8-flash (Argon 4 - Mới nhất & Khuyên dùng)")
+            console.print("  [2] gemini-2.5-flash")
+            console.print("  [3] gemini-2.0-flash")
+            console.print("  [4] Tùy chỉnh tên model khác")
+            m_pick = Prompt.ask("Chọn model", choices=["1", "2", "3", "4"], default="1")
+            model_map = {"1": "gemini-3.8-flash", "2": "gemini-2.5-flash", "3": "gemini-2.0-flash"}
+            chosen_m = model_map.get(m_pick) or Prompt.ask("Nhập tên model đầy đủ", default=model)
+            save_env_config({"GEMINI_MODEL": chosen_m})
+            env_config["GEMINI_MODEL"] = chosen_m
+        elif sub_choice == "6":
+            new_w = Prompt.ask("Số phút hẹn giờ mặc định khi nộp bài", default=def_wait)
+            save_env_config({"DEFAULT_WAIT_MINUTES": new_w})
+            env_config["DEFAULT_WAIT_MINUTES"] = new_w
+        elif sub_choice == "7":
+            new_sid = Prompt.ask("Mã trường (School ID)", default=school_id)
+            save_env_config({"SCHOOL_ID": new_sid})
+            client.school_id = new_sid
+            env_config["SCHOOL_ID"] = new_sid
+        elif sub_choice == "8":
+            new_sy = Prompt.ask("Năm học (School Year)", default=school_year)
+            save_env_config({"SCHOOL_YEAR": new_sy})
+            client.school_year = new_sy
+            env_config["SCHOOL_YEAR"] = new_sy
+
+    console.print("[bold green]✓ Cấu hình đã được lưu vào file .env thành công![/bold green]")
+    return env_config
+
 def main():
     console.print(Panel.fit(
         "[bold cyan]TOOL ONLUYEN - TERMINAL UI[/bold cyan]\n"
