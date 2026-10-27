@@ -795,7 +795,7 @@ def main():
         console.print("\n[bold cyan]═══ MENU CHỨC NĂNG ═══[/bold cyan]")
         console.print("  [1] [bold]Bắt đầu giải bài tập tự động[/bold]")
         console.print("  [2] [bold]Xem kết quả các bài đã nộp[/bold]")
-        console.print("  [3] [bold]Cấu hình AI Solver (Gemini / Jev Classifier)[/bold]")
+        console.print("  [3] [bold]Cấu hình hệ thống (Config TUI .env)[/bold]")
         console.print("  [4] [bold]Đổi tài khoản Onluyen[/bold]")
         console.print("  [0] [dim]Thoát chương trình[/dim]")
 
@@ -805,7 +805,18 @@ def main():
             console.print("[cyan]Tạm biệt![/cyan]")
             break
 
-        elif choice == "3" or (choice == "1" and solver is None):
+        elif choice == "3":
+            env_config = do_config_menu(client)
+            solver_mode = env_config.get("DEFAULT_SOLVER", "1")
+            cur_key = env_config.get("GEMINI_API_KEY", "")
+            cur_model = env_config.get("GEMINI_MODEL", "gemini-3.8-flash")
+            if solver_mode == "1" and cur_key:
+                solver = GeminiSolver(api_key=cur_key, model=cur_model)
+            else:
+                solver = JevClassifierSolver()
+            continue
+
+        elif choice == "1" and solver is None:
             console.print("\n[bold yellow]Chọn AI Solver để giải đề:[/bold yellow]")
             console.print("  [1] [bold]Google Gemini API (Official google-genai SDK)[/bold] (Độ chính xác cao)")
             console.print("  [2] [bold]Jev Classifier API (classifier.dev)[/bold] (Miễn phí, zero-shot classifier, không cần API key)")
