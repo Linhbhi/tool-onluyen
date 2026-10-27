@@ -3,8 +3,9 @@
 """
 tool-onluyen: Terminal UI tự động giải và nộp bài tập onluyen.vn
 Hỗ trợ solver qua:
-  1. Google Gemini API (Gemini 2.5 Flash / 2.0 Flash)
-  2. Jev Zero-shot Classifier (classifier.dev)
+  1. Google GenAI Python SDK (google-genai client.models.generate_content)
+     - Fallback sang REST API v1beta nếu chưa cài SDK
+  2. Jev Zero-shot Classifier (https://classifier.dev/)
 """
 
 import os
@@ -243,15 +244,58 @@ class JevClassifierSolver(BaseSolver):
 
 class GeminiSolver(BaseSolver):
     """
-    Sử dụng Google Gemini REST API v1beta (hỗ trợ gemini-2.5-flash / gemini-2.0-flash / gemini-1.5-flash).
-    Không cần cài đặt thư viện nặng, chạy trơn tru với API key từ Google AI Studio.
+    Sử dụng Google GenAI SDK chính thức (google-genai) theo chuẩn docs:
+      from google import genai
+      from google.genai import types
+      client = genai.Client(api_key=...)
+      client.models.generate_content(...)
+    Tự động fallback sang REST API v1beta nếu môi trường chưa hỗ trợ SDK.
     """
     def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
         self.api_key = api_key
         self.model = model
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        self.genai_client = None
+
+        try:
+            from google import genai
+            from google.genai import types
+            self.genai_client = genai.Client(api_key=self.api_key)
+            self.types = types
+        except Exception:
+            self.genai_client = None
 
     def _call(self, prompt: str) -> str:
+        # Cách 1: Dùng google-genai SDK chính thức
+        if self.genai_client:
+            try:
+                config = self.types.GenerateContentConfig(
+                    temperature=0.1,
+                    max_output_tokens=256
+                )
+                response = self.genai_client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config=config
+                )
+                if response and response.text:
+                    return response.text.strip()
+            except Exception as e:
+                # Fallback model nếu model 2.5 chưa mở trên key
+                if "2.5" in self.model:
+                    try:
+                        self.model = "gemini-2.0-flash"
+                        response = self.genai_client.models.generate_content(
+                            model=self.model,
+                            contents=prompt,
+                            config=config
+                        )
+                        if response and response.text:
+                            return response.text.strip()
+                    except Exception:
+                        pass
+
+        # Cách 2: Fallback sang REST API trực tiếp
+        endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
         headers = {"Content-Type": "application/json"}
         payload = {
             "contents": [{"parts": [{"text": prompt}]}],
@@ -261,7 +305,7 @@ class GeminiSolver(BaseSolver):
             }
         }
         try:
-            res = requests.post(self.endpoint, headers=headers, json=payload, timeout=25)
+            res = requests.post(endpoint, headers=headers, json=payload, timeout=25)
             if res.status_code == 200:
                 data = res.json()
                 candidates = data.get("candidates", [])
@@ -269,14 +313,9 @@ class GeminiSolver(BaseSolver):
                     parts = candidates[0].get("content", {}).get("parts", [])
                     if parts:
                         return parts[0].get("text", "").strip()
-            else:
-                # Fallback model nếu model 2.5 chưa có sẵn trên tier
-                if "gemini-2.5" in self.model:
-                    self.model = "gemini-2.0-flash"
-                    self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
-                    return self._call(prompt)
         except Exception as e:
-            console.print(f"[yellow]Gemini API error: {e}[/yellow]")
+            console.print(f"[yellow]Lỗi gọi Gemini API: {e}[/yellow]")
+
         return ""
 
     def solve_choice(self, question: str, options: List[str]) -> str:
@@ -363,7 +402,7 @@ def parse_raw_questions(raw_list: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def main():
     console.print(Panel.fit(
         "[bold cyan]TOOL ONLUYEN - TUI AUTO SOLVER[/bold cyan]\n"
-        "[dim]Tự động giải và nộp bài onluyen.vn với Gemini API & Jev Classifier[/dim]",
+        "[dim]Tự động giải và nộp bài onluyen.vn với Google GenAI SDK & Jev Classifier[/dim]",
         border_style="cyan"
     ))
 
@@ -400,7 +439,7 @@ def main():
 
     # 2. Chọn Solver
     console.print("\n[bold yellow]Chọn AI Solver để giải đề:[/bold yellow]")
-    console.print("  [1] [bold]Google Gemini API[/bold] (Độ chính xác cao, giải toán/lý/hóa/văn cực chuẩn)")
+    console.print("  [1] [bold]Google Gemini API (Official google-genai SDK)[/bold] (Độ chính xác cao)")
     console.print("  [2] [bold]Jev Classifier API (classifier.dev)[/bold] (Miễn phí, zero-shot classifier, không cần API key)")
     solver_choice = Prompt.ask("Lựa chọn", choices=["1", "2"], default="1")
 
@@ -412,7 +451,7 @@ def main():
             console.print("[red]Cần có Gemini API Key để sử dụng chế độ này.[/red]")
             return
         solver = GeminiSolver(api_key=key)
-        console.print("[green]✓ Đã cấu hình Gemini Solver (gemini-2.5-flash)[/green]")
+        console.print("[green]✓ Đã cấu hình Google GenAI SDK (gemini-2.5-flash / gemini-2.0-flash)[/green]")
     else:
         solver = JevClassifierSolver()
         console.print("[green]✓ Đã cấu hình Jev Classifier (classifier.dev)[/green]")
