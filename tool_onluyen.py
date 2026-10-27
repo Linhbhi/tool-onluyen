@@ -301,7 +301,7 @@ class GeminiSolver(BaseSolver):
     Google GenAI SDK (google-genai client.models.generate_content)
     với REST API fallback.
     """
-    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+    def __init__(self, api_key: str, model: str = "gemini-3.8-flash"):
         self.api_key = api_key
         self.model = model
         self.genai_client = None
@@ -329,18 +329,20 @@ class GeminiSolver(BaseSolver):
                 if response and response.text:
                     return response.text.strip()
             except Exception:
-                if "2.5" in self.model:
-                    try:
-                        self.model = "gemini-2.0-flash"
-                        response = self.genai_client.models.generate_content(
-                            model=self.model,
-                            contents=prompt,
-                            config=config
-                        )
-                        if response and response.text:
-                            return response.text.strip()
-                    except Exception:
-                        pass
+                fallback_chain = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.0-flash"]
+                for next_model in fallback_chain:
+                    if next_model != self.model:
+                        try:
+                            self.model = next_model
+                            response = self.genai_client.models.generate_content(
+                                model=self.model,
+                                contents=prompt,
+                                config=config
+                            )
+                            if response and response.text:
+                                return response.text.strip()
+                        except Exception:
+                            pass
 
         # Fallback REST API
         endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
@@ -698,7 +700,7 @@ def main():
                     continue
                 solver = GeminiSolver(api_key=gemini_key)
                 save_env_config({"DEFAULT_SOLVER": "1"})
-                console.print("[green]✓ Đã lưu và cấu hình Gemini Solver (gemini-2.5-flash)[/green]")
+                console.print("[green]✓ Đã lưu và cấu hình Gemini Solver (gemini-3.8-flash)[/green]")
             else:
                 solver = JevClassifierSolver()
                 save_env_config({"DEFAULT_SOLVER": "2"})
