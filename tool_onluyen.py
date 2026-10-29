@@ -14,6 +14,7 @@ import re
 import json
 import time
 import base64
+import hashlib
 import urllib.parse
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -82,11 +83,41 @@ def save_env_config(updates: Dict[str, str]):
             f.write(f"{k}={v}\n")
 
 
+def _process_img_tag(match: re.Match) -> str:
+    """Lưu ảnh base64 vào file tạm /tmp/onluyen_img để tránh làm phình to prompt gửi AI."""
+    src = match.group(1).strip()
+    if src.startswith("data:image"):
+        try:
+            parts = src.split(",", 1)
+            if len(parts) == 2:
+                header, b64data = parts
+                ext = "png"
+                if "image/jpeg" in header or "image/jpg" in header:
+                    ext = "jpg"
+                elif "image/webp" in header:
+                    ext = "webp"
+                elif "image/gif" in header:
+                    ext = "gif"
+
+                raw_bytes = base64.b64decode(b64data)
+                h = hashlib.md5(raw_bytes).hexdigest()[:12]
+                cache_dir = "/tmp/onluyen_img"
+                os.makedirs(cache_dir, exist_ok=True)
+                img_path = os.path.join(cache_dir, f"{h}.{ext}")
+                if not os.path.exists(img_path):
+                    with open(img_path, "wb") as f:
+                        f.write(raw_bytes)
+                return f" ![Hình ảnh]({img_path}) "
+        except Exception:
+            return " ![Hình ảnh] "
+    return f" ![Hình ảnh]({src}) "
+
+
 def clean_html(raw_html: str) -> str:
     """Loại bỏ HTML thừa, giữ lại link ảnh Markdown và định dạng dòng."""
     if not raw_html:
         return ""
-    raw_html = re.sub(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', r' ![Hình ảnh](\1) ', raw_html)
+    raw_html = re.sub(r'<img[^>]+src=["\']([^"\']+)["\'][^>]*>', _process_img_tag, raw_html)
     raw_html = re.sub(r'<br\s*/?>', '\n', raw_html, flags=re.IGNORECASE)
     raw_html = re.sub(r'</p>', '\n', raw_html, flags=re.IGNORECASE)
     text = re.sub(r"<[^>]+>", " ", raw_html)
